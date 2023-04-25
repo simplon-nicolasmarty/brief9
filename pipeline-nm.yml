@@ -1,0 +1,378 @@
+trigger:
+  - master
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  dockerRegistryServiceConnection: 'ConnectDockerHub'
+  imageRepository: 'k8b8nm'
+  containerRegistry: 'nemesys34'
+  repository: 'nemesys34/k8b8nm'
+  kubernetesServiceEndpoint: 'connectK8SNM'
+  aksClusterName: 'K8B8NM'
+
+stages:
+- stage: 'CodeAnalysis'
+  displayName: 'Code Analysis'
+  jobs:
+  - job: 'SonarQubeAnalysis'
+    displayName: 'SonarQube Analysis'
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - task: SonarQubePrepare@4
+      inputs:
+        SonarQube: 'SonarQube'
+        scannerMode: 'CLI'
+        configMode: 'manual'
+        cliProjectKey: 'MyProjectKey'
+        cliProjectName: 'MyProjectName'
+        cliSources: '.'
+    - script: |
+        dotnet build --configuration Release
+      displayName: 'Build'
+    - task: SonarQubeAnalyze@4
+      displayName: 'Run SonarQube Analysis'
+    - task: SonarQubePublish@4
+      inputs:
+        pollingTimeoutSec: '300'
+      displayName: 'Publish SonarQube Results'
+
+  - job: 'DependencyCheckAnalysis'
+    displayName: 'OWASP Dependency Check Analysis'
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - task: CmdLine@2
+      inputs:
+        script: |
+          curl -L -o dependency-check.zip https://github.com/jeremylong/DependencyCheck/releases/download/v6.5.0/dependency-check-6.5.0-release.zip
+          unzip dependency-check.zip -d dependency-check
+      displayName: 'Download and Unzip Dependency Check CLI'
+    - task: CmdLine@2
+      inputs:
+        script: |
+          dependency-check/bin/dependency-check.sh --project "MyProject" --scan . --format "ALL" --failOnCVSS 7 --out .
+      displayName: 'Run OWASP Dependency Check'
+
+- stage: 'docker'
+  jobs:
+  - job: 'buildandpush'
+    displayName: 'Build and push'
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - task: Kubernetes@1
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: $(kubernetesServiceEndpoint)
+        namespace: 'prod'
+        command: 'get'
+        arguments: 'deployments'
+        secretType: 'dockerRegistry'
+        containerRegistryType: Azure Container Registry
+      name: kube
+# awk permet de récupérer des caractéres précis -F pour lui donner le premier caractère où se positionner
+    - task: CmdLine@2
+      inputs:
+        script: |
+          versionrep=$(curl -sS "https://hub.docker.com/v2/repositories/$(imageRepository)/tags" | jq -r '."results"[0]["name"]')
+          versionold=$(echo $KUBEINFO_KUBECTLOUTPUT | jq '.items[1].spec.template.spec.containers[].image' | cut -d: -f2 | sed 's/"//')
+          versionnew=$(grep -o -E '^ver = "[0-9.]+"' azure-vote/main.py | awk -F\" '{print $2}')
+          echo "##vso[task.setvariable variable=vernew;isOutput=true]$versionnew"
+          echo "##vso[task.setvariable variable=verrep;isOutput=true]$versionrep"
+          sed -i 's/{{ version }}/'$versionnew'/g' manifest/vote-app.yml
+      name: scriptver
+
+# Ajout des étapes pour SonarQube et OWASP Dependency-Check
+    - task: SonarQubePrepare@4
+      inputs:
+        SonarQube: 'SonarQube'
+        scannerMode: 'CLI'
+        configMode: 'manual'
+        cliProjectKey: 'your_project_key'
+        cliProjectName: 'your_project_name'
+        cliSources: 'src'
+        extraProperties: 'sonar.exclusions=**/tests/**'
+
+    - task: SonarQubeAnalyze@4
+      displayName: 'Run SonarQube Analysis'
+
+    - task: SonarQubePublish@4
+      inputs:
+        pollingTimeoutSec: '300'
+      displayName: 'Publish SonarQube Analysis Results'
+
+    - task: CmdLine@2
+      displayName: 'OWASP Dependency-Check'
+      inputs:
+        script: |
+          docker pull owasp/dependency-check
+          docker run --rm -v $(System.DefaultWorkingDirectory):/src --name dependency-check owasp/dependency-check:latest \
+          --project $(Build.Repository.Name) \
+          --scan /src \
+          --out /src/dependency-check-report \
+          --format "ALL"
+          docker cp dependency-check:/src/dependency-check-report $(Build.ArtifactStagingDirectory)
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        pathtoPublish: '$(Build.ArtifactStagingDirectory)/dependency-check-report'
+        artifactName: 'DependencyCheck'
+        displayName: 'Publish Dependency-Check Artifacts'
+
+- stage: QAL_Deployment
+  dependsOn:
+  - docker
+  condition: succeeded()
+  displayName: Deploy on QAL
+  jobs:
+  - job: 'QAL_Deploy'
+    variables:
+      verrep: $[ stageDependencies.docker.buildandpush.outputs['scriptver.verrep'] ]
+      vernew: $[ stageDependencies.docker.buildandpush.outputs['scriptver.vernew'] ]
+    displayName: Deploy on QAL
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: CmdLine@2
+      name: modif_manif
+      inputs:
+        script: |
+          sed -i 's/{{ version }}/'$(vernew)'/g' manifest/vote-app.yml
+    - task: KubernetesManifest@0
+      name: "kube_qal"
+      displayName: Deploy resources on QAL
+      inputs:
+        action: 'deploy'
+        kubernetesServiceConnection: $(kubernetesServiceEndpoint)
+        namespace: 'qal'
+        manifests: manifest/vote-app.yml
+        rolloutStatusTimeout: '60'
+
+    - task: Bash@3
+      inputs:
+        targetType: 'inline'
+        script: 'sleep 30'
+      displayName: Wait for deployment
+
+    - task: Bash@3
+      inputs:
+        targetType: 'inline'
+        script: |
+          exitcode=$(curl -s -o -I -w "%{http_code}" http://brief8.uncia.fr)
+          echo "##vso[task.setvariable variable=exit]$exitcode"
+      displayName: Check deployment status
+
+    - task: CmdLine@2
+      condition: eq(variables['exit'], '200')
+      inputs:
+        script: |
+          seq 250 | parallel --max-args 0  --jobs 20 "curl -k -iF 'vote=Linux' http://brief8.uncia.fr"
+# effectue 250 requettes par paquet de 20 en parralléle -k bypasse le https et -i récupére les headers F appuis sur le bouton      
+      displayName: Load testing
+
+    - task: CmdLine@2
+      inputs :
+        script: 'sleep 30'
+      displayName: Wait for load test results
+
+    - task: Kubernetes@1
+      inputs:
+        connectionType: Kubernetes Service Connection
+        kubernetesServiceEndpoint: $(kubernetesServiceEndpoint)
+        namespace: 'qal'
+        command: 'get'
+        arguments: 'pods'
+      displayName: Get QAL pods
+      name: qalpods
+
+    - task: Bash@3
+      inputs:
+        targetType: 'inline'
+        script: |
+          pod_count=$(echo $QALPODS_KUBECTLOUTPUT | jq '.items | length')
+          echo "Number of pods: $pod_count"
+          echo "##vso[task.setvariable variable=countpods]$pod_count"
+# déclaration de variable ##vso[task.setvariable variable=nom ]valeur_a_affecter
+      displayName: Count pods
+
+    - task: Kubernetes@1
+      name: deleteqal
+      condition: ne(variables['countpods'], 2)
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: $(kubernetesServiceEndpoint)
+        namespace: 'qal'
+        command: 'delete'
+        arguments: '-f $(System.DefaultWorkingDirectory)/manifest/'
+      displayName: Delete QAL deployment if pod count not equal to 2
+
+    - task: Bash@3
+      name: yourverygood
+      condition: succeeded()
+      inputs:
+        targetType: 'inline'
+        script: 'echo "QAL DELETION"'
+
+- stage: Deploy_canary
+  condition: succeeded()
+  displayName: Deploy Canary Release
+  dependsOn:
+  - docker
+  jobs:
+  - job: Deploy_canary
+    variables:
+      verrep: $[ stageDependencies.docker.buildandpush.outputs['scriptver.verrep'] ]
+      vernew: $[ stageDependencies.docker.buildandpush.outputs['scriptver.vernew'] ]
+    displayName: Deployment of Canary Release
+    steps:
+    - task: CmdLine@2
+      name: modif_manif
+      inputs:
+        script: |
+          sed -i 's/{{ version }}/'$(vernew)'/g' manifest/vote-app.yml
+          sed -n 19p manifest/vote-app.yml
+          echo $vernnew
+    - task: KubernetesManifest@0
+      name: kubeonprodcanary
+      condition: succeeded()
+      displayName: Deploy Canary on Prod
+      inputs:
+        action: 'deploy'
+        kubernetesServiceConnection: $(kubernetesServiceEndpoint)
+        namespace: 'prod'
+        strategy: 'canary'
+        percentage: '30'
+        manifests: manifest/vote-app.yml
+
+- stage: ManualIntervention
+  condition: succeeded() 
+  displayName: 'In waiting of validation of working canary release' 
+  jobs:
+  - job: 'waitForValidation'
+    displayName: 'Wait for external validation before proceeding'
+    pool: server
+    timeoutInMinutes: 4320 # job times out in 3 days
+    steps:
+    - task: ManualValidation@0
+      timeoutInMinutes: 1440 # task times out in 1 day
+      inputs:
+        notifyUsers: 'simplon.nicolasmarty@gmail.com'
+        instructions: 'Please validate the build configuration and resume'
+        onTimeout: 'resume'
+        failOnTimeout: true # fail the build if the validation times out
+      condition: succeededOrFailed() # continue the pipeline if the validation fails
+      continueOnError: true # continue the pipeline if there's an error during the validation
+
+- stage: DeployOnProd
+  displayName: 'Deploy on Prod and delete Canary'
+  jobs:
+  - job: 'Deployonprod'
+    displayName: 'Deploy on Prod and delete Canary'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: CmdLine@2
+      name: modif_manif
+      inputs:
+        script: |
+          sed -i 's/{{ version }}/'$(vernew)'/g' manifest/vote-app.yml
+    - task: Kubernetes@1
+      name: deleteprodapp
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: $(kubernetesServiceEndpoint)
+        namespace: 'prod'
+        command: 'delete'
+        arguments: manifest/vote-app.yml
+      displayName: Delete Canary from Prod
+
+    - task: Kubernetes@1
+      name: deployprod
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: $(kubernetesServiceEndpoint)
+        namespace: 'prod'
+        command: 'apply'
+        useConfigurationFile: true
+        configuration: manifest/vote-app.yml
+      displayName: Deploy on Prod
+
+    - task: Bash@3
+      name: yourdeployment
+      condition: succeeded()
+      inputs:
+        targetType: 'inline'
+        script: 'echo "DEPLOY TO PROD OK"'
+
+- stage: PerformanceTest
+  condition: succeeded()
+  dependsOn: 'DeployOnProd'
+  displayName: 'Performance Test on Prod'
+  jobs:
+  - job: PerformanceTest
+    displayName: 'Performance Test on Prod'
+    pool:
+     vmImage: 'ubuntu-latest'
+    steps:
+    - task: Kubernetes@1
+      displayName: Get Prod deployment
+      name: onprod
+      inputs:
+        connectionType: Kubernetes Service Connection
+        kubernetesServiceEndpoint: $(kubernetesServiceEndpoint)
+        namespace: 'prod'
+        command: 'get'
+        useConfigurationFile: true
+        configuration: manifest/vote-app.yml
+
+    - task: Bash@3
+      inputs:
+        targetType: 'inline'
+        script: |
+          ONPROD_OUTPUT=$(echo $(onprod.KubernetesCliOutput) | tr -d '\r')
+          podcount=$(echo $ONPROD_OUTPUT | jq '.items | length')
+          echo "Total number of production pods: $podcount"
+          if [ "$podcount" -eq "0" ]; then
+            echo "Error: No production pods found"
+            exit 1
+          fi
+      displayName: Check production pod count
+
+    - task: Bash@3
+      inputs:
+        targetType: 'inline'
+        script: 'sleep 30'
+        displayName: Wait for load test results
+
+    - task: CmdLine@2
+      inputs:
+        script: 'echo "Performance test on Prod completed."'
+      displayName: Performance test results
+
+- stage: Rollback
+  condition: failed()
+  dependsOn: PerformanceTest
+  displayName: Rollback Deployment
+  jobs:
+  - job: Rollback
+    displayName: Rollback Deployment
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: Kubernetes@1
+      inputs:
+        connectionType: Kubernetes Service Connection
+        kubernetesServiceEndpoint: $(kubernetesServiceEndpoint)
+        namespace: prod
+        command: rollback
+        arguments: manifest/vote-app.yml
+      displayName: Rollback deployment on Prod
+
+    - task: Bash@3
+      inputs:
+        targetType: 'inline'
+        script: 'echo "Rollback completed."'
+      displayName: Rollback status
