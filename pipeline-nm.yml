@@ -141,8 +141,8 @@ stages:
       inputs:
         script: |
           sudo grype dir:/home/vsts/work/1/
-          gryperesult=$(echo $?)
-          echo "##vso[task.setvariable variable=gryre;isOutput=true]$gryperesult"
+          grype_var=$(echo $?)
+          echo "##vso[task.setvariable variable=gryre;isOutput=true]$grype_var"
 
 - stage: VerificationGrype
   displayName: Vérification manuelle Grype
