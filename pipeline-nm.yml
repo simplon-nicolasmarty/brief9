@@ -1,9 +1,8 @@
+# Ce pipeline est déclenché lorsqu'une modification est apportée à la branche master
 trigger:
-  - master
+- master
 
-pool:
-  vmImage: ubuntu-latest
-
+# Définition des variables utilisées dans le pipeline
 variables:
   dockerRegistryServiceConnection: 'ConnectDockerHub'
   imageRepository: 'k8b8nm'
@@ -11,368 +10,460 @@ variables:
   repository: 'nemesys34/k8b8nm'
   kubernetesServiceEndpoint: 'connectK8SNM'
   aksClusterName: 'K8B8NM'
+  organization: 'nicolasmarty'
+  connecteursonarcloud: 'connect_sonar'
 
+# Liste des étapes du pipeline
 stages:
-- stage: 'CodeAnalysis'
-  displayName: 'Code Analysis'
+# Etape 1 : Valider l'application
+- stage: 'valid_app'
+  displayName: 'valid_app'
   jobs:
-  - job: 'SonarQubeAnalysis'
-    displayName: 'SonarQube Analysis'
+  - job: version_compare
+    displayName: 'validcode' 
+    # Utiliser une image Ubuntu pour l'environnement d'exécution
     pool:
       vmImage: ubuntu-latest
     steps:
-    - task: SonarQubePrepare@4
+    # Récupérer le code source
+    - checkout: self
+      fetchDepth: 0
+    # Préparer l'analyse SonarCloud
+    - task: SonarCloudPrepare@1
       inputs:
-        SonarQube: 'SonarQube'
+        SonarCloud: $(connecteursonarcloud)
+        organization: $(organization)
         scannerMode: 'CLI'
         configMode: 'manual'
-        cliProjectKey: 'MyProjectKey'
-        cliProjectName: 'MyProjectName'
+        cliProjectKey: 'uncia-key'
+        cliProjectName: 'Brief-8'
         cliSources: '.'
-    - script: |
-        dotnet build --configuration Release
-      displayName: 'Build'
-    - task: SonarQubeAnalyze@4
-      displayName: 'Run SonarQube Analysis'
-    - task: SonarQubePublish@4
+    # Exécuter l'analyse SonarCloud
+    - task: SonarCloudAnalyze@1
+    # Publier les résultats de l'analyse SonarCloud
+    - task: SonarCloudPublish@1
       inputs:
         pollingTimeoutSec: '300'
-      displayName: 'Publish SonarQube Results'
 
-  - job: 'DependencyCheckAnalysis'
-    displayName: 'OWASP Dependency Check Analysis'
-    pool:
-      vmImage: ubuntu-latest
-    steps:
-    - task: CmdLine@2
-      inputs:
-        script: |
-          curl -L -o dependency-check.zip https://github.com/jeremylong/DependencyCheck/releases/download/v6.5.0/dependency-check-6.5.0-release.zip
-          unzip dependency-check.zip -d dependency-check
-      displayName: 'Download and Unzip Dependency Check CLI'
-    - task: CmdLine@2
-      inputs:
-        script: |
-          dependency-check/bin/dependency-check.sh --project "MyProject" --scan . --format "ALL" --failOnCVSS 7 --out .
-      displayName: 'Run OWASP Dependency Check'
-
-- stage: 'docker'
+# Etape 2 : Récupérer la version de l'application
+- stage: 'get_version' 
+  displayName: 'get_version' 
   jobs:
-  - job: 'buildandpush'
-    displayName: 'Build and push'
+  - job: 'job_version' 
+    displayName: 'job_version' 
     pool:
       vmImage: ubuntu-latest
     steps:
+    # Récupérer les informations du déploiement Kubernetes
     - task: Kubernetes@1
       inputs:
         connectionType: 'Kubernetes Service Connection'
         kubernetesServiceEndpoint: $(kubernetesServiceEndpoint)
-        namespace: 'prod'
+        namespace: 'prod' # Namespace où l'application sera déployée
         command: 'get'
-        arguments: 'deployments'
+        arguments: 'deployments --field-selector metadata.name=voteapp'
         secretType: 'dockerRegistry'
-        containerRegistryType: Azure Container Registry
-      name: kube
-# awk permet de récupérer des caractéres précis -F pour lui donner le premier caractère où se positionner
+        containerRegistryType: 'Azure Container Registry'
+      name: "kube"
+
+    # Comparer les versions de l'application
+   # Tâche pour déterminer et récupérer les différentes versions de l'application
     - task: CmdLine@2
       inputs:
         script: |
-          versionrep=$(curl -sS "https://hub.docker.com/v2/repositories/$(imageRepository)/tags" | jq -r '."results"[0]["name"]')
-          versionold=$(echo $KUBEINFO_KUBECTLOUTPUT | jq '.items[1].spec.template.spec.containers[].image' | cut -d: -f2 | sed 's/"//')
-          versionnew=$(grep -o -E '^ver = "[0-9.]+"' azure-vote/main.py | awk -F\" '{print $2}')
+          # Récupérer la dernière version déployée à partir du registre Docker
+          versionrep=$((curl "https://hub.docker.com/v2/repositories/$(imageRepository)/tags" | jq '."results"[0]["name"]')| sed 's/^"//;s/"$//')
+          
+          # Récupérer la version actuellement déployée dans le cluster Kubernetes
+          versionold=$(echo $kube_KUBECTLOUTPUT | jq '.items[0].spec.template.spec.containers[].image' | cut -d: -f2 | sed 's/"//')
+          
+          # Récupérer la version de l'application à partir du fichier main.py
+          versionnew=$(cat azure-vote/main.py | grep -E "^ver = \"[0-9.]+\"\$"|awk -F\" {'print $2'})
+          
+          # Enregistrer les variables pour les étapes suivantes du pipeline
           echo "##vso[task.setvariable variable=vernew;isOutput=true]$versionnew"
           echo "##vso[task.setvariable variable=verrep;isOutput=true]$versionrep"
-          sed -i 's/{{ version }}/'$versionnew'/g' manifest/vote-app.yml
-      name: scriptver
+          echo "##vso[task.setvariable variable=verold;isOutput=true]$versionold"
+          
+          # Afficher les variables pour vérification
+          echo verrep=$versionrep verold=$versionold vernew=$versionnew
+      name: "scver" # nom du script de versionning
 
-# Ajout des étapes pour SonarQube et OWASP Dependency-Check
-    - task: SonarQubePrepare@4
+
+# Étape pour construire l'image Docker de l'application
+- stage: 'Build_docker_image'
+  variables:
+    # Récupérer les versions de l'étape précédente
+    verrep: $[stageDependencies.get_version.job_version.outputs['scver.verrep']]
+    vernew: $[stageDependencies.get_version.job_version.outputs['scver.vernew']]
+  dependsOn:
+  - get_version
+  displayName: 'Build_docker_image'
+  jobs:
+  - job: 'Docker_image'
+    displayName: 'Docker Image Build'
+    pool:
+      # Utiliser une image Ubuntu pour le job
+      vmImage: ubuntu-latest
+    steps:
+    - task: Docker@2
+      # Exécuter cette tâche uniquement si la version actuelle est différente de la version du registre Docker
+      condition: ne(variables.verrep,variables.vernew)
       inputs:
-        SonarQube: 'SonarQube'
-        scannerMode: 'CLI'
-        configMode: 'manual'
-        cliProjectKey: 'your_project_key'
-        cliProjectName: 'your_project_name'
-        cliSources: 'src'
-        extraProperties: 'sonar.exclusions=**/tests/**'
+        # Paramètres pour se connecter au registre Docker
+        containerRegistry: $(dockerRegistryServiceConnection)
+        repository: $(repository)
+        command: 'buildAndPush' # Construire et pousser l'image Docker
+        Dockerfile: '**/Dockerfile' # Spécifier le fichier Dockerfile à utiliser
+        tags: | # Ajouter la nouvelle version en tant que tag
+          $(vernew)
+      name: "docker_pub"
 
-    - task: SonarQubeAnalyze@4
-      displayName: 'Run SonarQube Analysis'
-
-    - task: SonarQubePublish@4
-      inputs:
-        pollingTimeoutSec: '300'
-      displayName: 'Publish SonarQube Analysis Results'
-
+- stage: test_gryp
+  displayName: test avec gryp
+  # Exécuter cette étape seulement si les étapes précédentes ont réussi
+  condition: succeeded()
+  jobs:
+  - job: test_gryp
+    displayName: test avec gryp
+    pool:
+      # Utiliser une image Ubuntu la plus récente pour l'exécution des tâches
+      vmImage: 'ubuntu-latest'
+    steps:
+    # Installer l'outil Gryp à l'aide du script d'installation
     - task: CmdLine@2
-      displayName: 'OWASP Dependency-Check'
       inputs:
         script: |
-          docker pull owasp/dependency-check
-          docker run --rm -v $(System.DefaultWorkingDirectory):/src --name dependency-check owasp/dependency-check:latest \
-          --project $(Build.Repository.Name) \
-          --scan /src \
-          --out /src/dependency-check-report \
-          --format "ALL"
-          docker cp dependency-check:/src/dependency-check-report $(Build.ArtifactStagingDirectory)
-
-    - task: PublishBuildArtifacts@1
+          sudo curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+    # Exécuter l'outil Gryp pour analyser les vulnérabilités et stocker le résultat dans une variable
+    - task: CmdLine@2
+      name: finalresult
       inputs:
-        pathtoPublish: '$(Build.ArtifactStagingDirectory)/dependency-check-report'
-        artifactName: 'DependencyCheck'
-        displayName: 'Publish Dependency-Check Artifacts'
+        script: |
+          sudo grype dir:/home/vsts/work/1/
+          gryperesult=$(echo $?)
+          echo "##vso[task.setvariable variable=gryre;isOutput=true]$gryperesult"
 
-- stage: QAL_Deployment
+- stage: VerificationGrype
+  displayName: Vérification manuelle Grype
+  # Cette étape dépend de l'étape 'test_gryp'
+  dependsOn: test_gryp
+  # Exécuter cette étape seulement si le résultat de l'étape 'test_gryp' est différent de 0 (c'est-à-dire, s'il y a des vulnérabilités)
+  condition: ne(dependencies.test_gryp.outputs['test_gryp.finalresult.gryre'],0)
+  jobs:
+  - job: Verifmanuelle
+    pool: server
+    steps:
+    # Demander une vérification manuelle en cas de vulnérabilités détectées
+    - task: ManualValidation@0
+      timeoutInMinutes: 240 # La tâche expire au bout de 4 heures
+      inputs:
+        notifyUsers: |
+          simplon.nicolasmarty@gmail.com
+        instructions: 'Please check the problem for Grype'
+        onTimeout: 'reject'
+
+- stage: 'QAL_Deployment'
   dependsOn:
-  - docker
+  - get_version
+  - Build_docker_image
+  # Exécuter cette étape seulement si les étapes précédentes ont réussi
   condition: succeeded()
-  displayName: Deploy on QAL
+  displayName: 'Deploy on QAL' 
   jobs:
   - job: 'QAL_Deploy'
     variables:
-      verrep: $[ stageDependencies.docker.buildandpush.outputs['scriptver.verrep'] ]
-      vernew: $[ stageDependencies.docker.buildandpush.outputs['scriptver.vernew'] ]
-    displayName: Deploy on QAL
+      verold: $[stageDependencies.get_version.job_version.outputs['scver.verold']]
+      vernew: $[stageDependencies.get_version.job_version.outputs['scver.vernew']]
+    displayName: 'Deploy on QAL' 
     pool:
-      vmImage: 'ubuntu-latest'
+      # Utiliser une image Ubuntu la plus récente pour l'exécution des tâches
+      vmImage: 'ubuntu-latest' 
     steps:
+    # Modifier le fichier de manifeste pour utiliser la nouvelle version
     - task: CmdLine@2
-      name: modif_manif
+      name: change_manif
       inputs:
         script: |
           sed -i 's/{{ version }}/'$(vernew)'/g' manifest/vote-app.yml
+    # Déployer l'application sur l'environnement QAL
     - task: KubernetesManifest@0
       name: "kube_qal"
-      displayName: Deploy resources on QAL
+      condition: ne(variables.verold,variables.vernew)
       inputs:
         action: 'deploy'
-        kubernetesServiceConnection: $(kubernetesServiceEndpoint)
-        namespace: 'qal'
-        manifests: manifest/vote-app.yml
-        rolloutStatusTimeout: '60'
+        kubernetesServiceConnection: 'connectK8SNM' # Connexion au service Kubernetes
+        namespace: 'qal' # Namespace où l'application sera déployée
+        manifests: manifest/vote-app.yml # Fichier de manifeste à utiliser pour le déploiement
+        rolloutStatusTimeout: '60' # Délai d'attente maximal pour le déploiement (en secondes)
 
+- stage: 'Test_Charge'
+  condition: succeeded()
+  dependsOn:
+  - get_version
+  - QAL_Deployment
+  displayName: 'Test_Charge'
+  jobs:
+  - job: 'Test'
+    timeoutInMinutes: 5
+    variables:
+      verold: $[stageDependencies.get_version.job_version.outputs['scver.verold']]
+      vernew: $[stageDependencies.get_version.job_version.outputs['scver.vernew']]
+      appcnt: $[stageDependencies.Test_Charge.Test.outputs['GetPodsCount.appcnt']]
+    displayName: 'Test_Charge' 
+    pool:
+      vmImage: 'ubuntu-latest' 
+    steps:
+    # Étape 1 : Tester l'application
     - task: Bash@3
-      inputs:
-        targetType: 'inline'
-        script: 'sleep 30'
-      displayName: Wait for deployment
-
-    - task: Bash@3
+      name: apptest
+      displayName: app test
       inputs:
         targetType: 'inline'
         script: |
-          exitcode=$(curl -s -o -I -w "%{http_code}" http://brief8.uncia.fr)
-          echo "##vso[task.setvariable variable=exit]$exitcode"
-      displayName: Check deployment status
+          exitcode=$(curl -X POST -d "vote=Windows" http://brief8.uncia.fr -w "%{http_code}" -o /dev/null)
+          echo "##vso[task.setvariable variable=exit1]$exitcode"
 
+    # Étape 2 : Tester le vote pour Linux
+    - task: Bash@3
+      name: linux
+      displayName: Test vote Linux'
+      condition: eq(variables['exit1'],'200')
+      inputs:
+        targetType: 'inline'
+        script: |
+          exitcode=$(curl -X POST -d "vote=Linux" http://brief8.uncia.fr -w "%{http_code}" -o /dev/null)
+          echo "##vso[task.setvariable variable=exit2]$exitcode"
+
+    # Étape 3 : Tester la requête pour réinitialiser les votes
+    - task: Bash@3
+      name: checksitereset
+      displayName: Test de la requête pour reset
+      condition: eq(variables['exit2'],'200')
+      inputs:
+        targetType: 'inline'
+        script: |
+          exitcode=$(curl -X POST -d "vote=reset" http://brief8.uncia.fr -w "%{http_code}" -o /dev/null)
+          echo "##vso[task.setvariable variable=exit3]$exitcode"
+
+    # Étape 4 : Effectuer un scan de sécurité avec OWASP ZAP
+    - task: owaspzap@1
+      inputs:
+        aggressivemode: true
+        scantype: 'targetedScan'
+        url: 'http://brief8.uncia.fr'
+
+    # Étape 5 : Comparer les temps de réponse entre l'environnement QAL et l'environnement de production
     - task: CmdLine@2
-      condition: eq(variables['exit'], '200')
+      condition: eq(variables['exit3'],'200')
+      name: timetoresp
       inputs:
         script: |
+          inc=0.5
+          # Mesurer le temps de réponse pour l'environnement QAL
+          trqal=$(curl -o /dev/null -s -w %{time_total}\\n  -iF 'vote=linux' http://brief8.uncia.fr)
+          # Mesurer le temps de réponse pour l'environnement de production
+          trprod=$(curl -o /dev/null -s -w %{time_total}\\n  -iF 'vote=linux' http://brief8.uncia.fr)
+          # Calculer la somme du temps de réponse de production et d'une constante 'inc'
+          result=$(echo "$trprod + $inc"|bc)
+          # Définir les variables pour les temps de réponse de QAL et de production
+          echo "##vso[task.setvariable variable=trqal]$trqal"
+          echo "##vso[task.setvariable variable=trprod]$result"
+          # Afficher les temps de réponse pour QAL et production
+          echo qal=$trqal prod=$trprod
+
+    # Étape 6 : Effectuer un test de charge si le temps de réponse en production est supérieur au temps de réponse en QAL
+    - task: CmdLine@2
+      condition: gt(variables['trprod'],variables['trqal'])
+      name: TestCharge
+      inputs:
+        script: |
+          # Exécuter 250 requêtes parallèles avec 20 jobs simultanés
           seq 250 | parallel --max-args 0  --jobs 20 "curl -k -iF 'vote=Linux' http://brief8.uncia.fr"
-# effectue 250 requettes par paquet de 20 en parralléle -k bypasse le https et -i récupére les headers F appuis sur le bouton      
-      displayName: Load testing
 
+    # Étape 7 : Attendre 50 secondes
     - task: CmdLine@2
-      inputs :
-        script: 'sleep 30'
-      displayName: Wait for load test results
-
-    - task: Kubernetes@1
+      condition: gt(variables['trprod'],variables['trqal'])
       inputs:
-        connectionType: Kubernetes Service Connection
-        kubernetesServiceEndpoint: $(kubernetesServiceEndpoint)
-        namespace: 'qal'
-        command: 'get'
-        arguments: 'pods'
-      displayName: Get QAL pods
-      name: qalpods
+        script: 'sleep 50'
+      name: "wait"
 
-    - task: Bash@3
-      inputs:
-        targetType: 'inline'
-        script: |
-          pod_count=$(echo $QALPODS_KUBECTLOUTPUT | jq '.items | length')
-          echo "Number of pods: $pod_count"
-          echo "##vso[task.setvariable variable=countpods]$pod_count"
-# déclaration de variable ##vso[task.setvariable variable=nom ]valeur_a_affecter
-      displayName: Count pods
-
+    # Étape 8 : Récupérer les informations sur les pods Kubernetes
     - task: Kubernetes@1
-      name: deleteqal
-      condition: ne(variables['countpods'], 2)
+      name: kubepods
+      condition: succeeded()
       inputs:
         connectionType: 'Kubernetes Service Connection'
-        kubernetesServiceEndpoint: $(kubernetesServiceEndpoint)
-        namespace: 'qal'
-        command: 'delete'
-        arguments: '-f $(System.DefaultWorkingDirectory)/manifest/'
-      displayName: Delete QAL deployment if pod count not equal to 2
+        kubernetesServiceEndpoint: 'connectK8SNM' # Connexion au service Kubernetes
+        namespace: 'qal' # Namespace où l'application sera déployée
+        command: 'get'
+        useConfigurationFile: true
+        configuration: './manifest/vote-app.yml'
 
-    - task: Bash@3
-      name: yourverygood
-      condition: succeeded()
-      inputs:
-        targetType: 'inline'
-        script: 'echo "QAL DELETION"'
-
-- stage: Deploy_canary
-  condition: succeeded()
-  displayName: Deploy Canary Release
-  dependsOn:
-  - docker
-  jobs:
-  - job: Deploy_canary
-    variables:
-      verrep: $[ stageDependencies.docker.buildandpush.outputs['scriptver.verrep'] ]
-      vernew: $[ stageDependencies.docker.buildandpush.outputs['scriptver.vernew'] ]
-    displayName: Deployment of Canary Release
-    steps:
+    # Étape 9 : Modifier le fichier de manifeste pour utiliser la nouvelle version
     - task: CmdLine@2
-      name: modif_manif
+      name: change_manif
       inputs:
         script: |
+          # Remplacer la chaîne "{{ version }}" par la valeur de la variable 'vernew' dans le fichier manifest/vote-app.yml
           sed -i 's/{{ version }}/'$(vernew)'/g' manifest/vote-app.yml
-          sed -n 19p manifest/vote-app.yml
-          echo $vernnew
-    - task: KubernetesManifest@0
-      name: kubeonprodcanary
-      condition: succeeded()
-      displayName: Deploy Canary on Prod
-      inputs:
-        action: 'deploy'
-        kubernetesServiceConnection: $(kubernetesServiceEndpoint)
-        namespace: 'prod'
-        strategy: 'canary'
-        percentage: '30'
-        manifests: manifest/vote-app.yml
+          # Afficher la nouvelle version
+          echo $(vernew)
 
-- stage: ManualIntervention
-  condition: succeeded() 
-  displayName: 'In waiting of validation of working canary release' 
+# Étape 10 : Obtenir le nombre de pods
+    - task: CmdLine@2
+      condition: succeeded()
+      name: "GetPodsCount"
+      inputs:
+        script: |
+          # Récupérer le nombre de réplicas pour l'application "vote"
+          voteappcount=$(echo $KUBEPODS_KUBECTLOUTPUT | jq '.items[0].spec.replicas')
+          
+          # Afficher le nombre de réplicas
+          echo $voteappcount
+          
+          # Sauvegarder le nombre de réplicas dans une variable pour pouvoir l'utiliser plus tard
+          echo "##vso[task.setvariable variable=appcnt;isOutput=true]$voteappcount"
+
+# Supprimer le déploiement dans l'environnement de test
+    - task: KubernetesManifest@0
+      name: "kube_qal_del"
+      inputs:
+        action: 'delete'
+        kubernetesServiceConnection: 'connectK8SNM' # Connexion au service Kubernetes
+        namespace: 'qal' # Namespace où l'application sera déployée
+        arguments: '-f $(System.DefaultWorkingDirectory)/qal/'
+
+# Déployer l'application en utilisant la stratégie canary
+- stage: 'Canary_deploy'
+  dependsOn:
+  - Test_Charge
+  - get_version
+  condition: gt(dependencies.Test_Charge.outputs['Test.GetPodsCount.appcnt'],2)
+  displayName: 'Canary_deploy' 
   jobs:
-  - job: 'waitForValidation'
-    displayName: 'Wait for external validation before proceeding'
+  - job: 'canary'
+    variables:
+      verold: $[stageDependencies.get_version.job_version.outputs['scver.verold']]
+      vernew: $[stageDependencies.get_version.job_version.outputs['scver.vernew']]
+      appcnt: $[stageDependencies.Test_Charge.Test.outputs['GetPodsCount.appcnt']]
+    displayName: 'Canary_deploy' 
+    pool:
+      vmImage: 'ubuntu-latest' 
+    steps:
+    - task: CmdLine@2
+      name: change_manif
+      inputs:
+        script: |
+          # Remplacer la chaîne "{{ version }}" par la valeur de la variable 'vernew' dans le fichier manifest/vote-app.yml
+          sed -i 's/{{ version }}/'$(vernew)'/g' manifest/vote-app.yml
+
+    - task: KubernetesManifest@0
+      condition: gt(variables.appcnt,2)
+      inputs:
+        action: 'deploy' # Action à effectuer : déploiement
+        kubernetesServiceConnection: 'connectK8SNM' # Connexion au service Kubernetes
+        namespace: 'prod' # Namespace où l'application sera déployée
+        strategy: 'canary' # Stratégie de déploiement : canary
+        percentage: '30' # Pourcentage de trafic à diriger vers le déploiement canary 
+        manifests: manifest/vote-app.yml # Fichier de manifeste à utiliser pour le déploiement
+        rolloutStatusTimeout: '120' # Délai d'attente maximal pour le déploiement (en secondes)
+      name: "kube_canary"
+
+# Attendre la validation manuelle avant de passer à l'étape suivante
+- stage: 'ManualIntervention'
+  dependsOn:
+  - Canary_deploy
+  condition: succeeded() 
+  displayName: 'En attente de validation' 
+  jobs:
+  - job: waitForValidation
+    displayName: Wait for external validation
     pool: server
-    timeoutInMinutes: 4320 # job times out in 3 days
+    timeoutInMinutes: 10080 # job times out in 7 days
     steps:
     - task: ManualValidation@0
-      timeoutInMinutes: 1440 # task times out in 1 day
+      timeoutInMinutes: 10080 # task times out in 7 day
       inputs:
-        notifyUsers: 'simplon.nicolasmarty@gmail.com'
-        instructions: 'Please validate the build configuration and resume'
+        notifyUsers: |
+          simplon.nicolasmarty@gmail.com
+        instructions: 'Valider le déploiement'
         onTimeout: 'resume'
-        failOnTimeout: true # fail the build if the validation times out
-      condition: succeededOrFailed() # continue the pipeline if the validation fails
-      continueOnError: true # continue the pipeline if there's an error during the validation
 
-- stage: DeployOnProd
-  displayName: 'Deploy on Prod and delete Canary'
+- stage: 'supcanar'
+  # Cette étape (stage) est exécutée lorsque les étapes précédentes échouent
+  condition: failed()
+  dependsOn:
+  - get_version
+  - ManualIntervention
+  - Test_Charge
+  displayName: 'remove canary'
+  jobs:
+  - job: 'delete'
+    # Récupérer les variables verold et vernew des étapes précédentes
+    variables:
+      verold: $[stageDependencies.get_version.job_version.outputs['scver.verold']]
+      vernew: $[stageDependencies.get_version.job_version.outputs['scver.vernew']]
+    displayName: 'Deploy on prod and remove canary'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: CmdLine@2
+      name: change_manif
+      inputs:
+        script: |
+          # Remplacer la chaîne "{{ version }}" par la valeur de la variable 'vernew' dans le fichier manifest/vote-app.yml
+          sed -i 's/{{ version }}/'$(vernew)'/g' manifest/vote-app.yml
+    - task: KubernetesManifest@0
+      name: "delete_canary"
+      inputs:
+        action: 'deploy' # Action à effectuer : déploiement
+        kubernetesServiceConnection: 'connectK8SNM' # Connexion au service Kubernetes
+        namespace: 'prod' # Namespace où l'application sera déployée
+        strategy: 'canary'
+        percentage: '0' # Pourcentage de trafic à diriger vers le déploiement canary (0 = supprimer le canary)
+        manifests: manifest/vote-app.yml # Fichier de manifeste à utiliser pour le déploiement
+        rolloutStatusTimeout: '60' # Délai d'attente maximal pour le déploiement (en secondes)
+
+- stage: 'DeployOnProd'
+  dependsOn:
+  - Test_Charge
+  - Canary_deploy
+  - ManualIntervention
+  - get_version
+  # Cette étape (stage) est exécutée lorsque les étapes précédentes réussissent
+  condition: succeeded()
+  displayName: 'Deploy on Prod and remove canary'
   jobs:
   - job: 'Deployonprod'
-    displayName: 'Deploy on Prod and delete Canary'
+    # Récupérer les variables verold et vernew des étapes précédentes
+    variables:
+      verold: $[stageDependencies.get_version.job_version.outputs['scver.verold']]
+      vernew: $[stageDependencies.get_version.job_version.outputs['scver.vernew']]
+    displayName: 'Deploy on Prod and remove canary'
     pool:
       vmImage: 'ubuntu-latest'
     steps:
     - task: CmdLine@2
-      name: modif_manif
+      name: change_manif
       inputs:
         script: |
+          # Remplacer la chaîne "{{ version }}" par la valeur de la variable 'vernew' dans le fichier manifest/vote-app.yml
           sed -i 's/{{ version }}/'$(vernew)'/g' manifest/vote-app.yml
-    - task: Kubernetes@1
-      name: deleteprodapp
+    - task: KubernetesManifest@0
+      name: "delete_canary"
       inputs:
-        connectionType: 'Kubernetes Service Connection'
-        kubernetesServiceEndpoint: $(kubernetesServiceEndpoint)
-        namespace: 'prod'
-        command: 'delete'
-        arguments: manifest/vote-app.yml
-      displayName: Delete Canary from Prod
-
-    - task: Kubernetes@1
-      name: deployprod
+        action: 'deploy' # Action à effectuer : déploiement
+        kubernetesServiceConnection: 'connectK8SNM' # Connexion au service Kubernetes
+        namespace: 'prod' # Namespace où l'application sera déployée
+        strategy: 'canary'
+        percentage: '0' # Pourcentage de trafic à diriger vers le déploiement canary (0 = supprimer le canary)
+        manifests: manifest/vote-app.yml # Fichier de manifeste à utiliser pour le déploiement
+        rolloutStatusTimeout: '60' # Délai d'attente maximal pour le déploiement (en secondes)
+    - task: KubernetesManifest@0
+      name: "kube_prod"
       inputs:
-        connectionType: 'Kubernetes Service Connection'
-        kubernetesServiceEndpoint: $(kubernetesServiceEndpoint)
-        namespace: 'prod'
-        command: 'apply'
-        useConfigurationFile: true
-        configuration: manifest/vote-app.yml
-      displayName: Deploy on Prod
-
-    - task: Bash@3
-      name: yourdeployment
-      condition: succeeded()
-      inputs:
-        targetType: 'inline'
-        script: 'echo "DEPLOY TO PROD OK"'
-
-- stage: PerformanceTest
-  condition: succeeded()
-  dependsOn: 'DeployOnProd'
-  displayName: 'Performance Test on Prod'
-  jobs:
-  - job: PerformanceTest
-    displayName: 'Performance Test on Prod'
-    pool:
-     vmImage: 'ubuntu-latest'
-    steps:
-    - task: Kubernetes@1
-      displayName: Get Prod deployment
-      name: onprod
-      inputs:
-        connectionType: Kubernetes Service Connection
-        kubernetesServiceEndpoint: $(kubernetesServiceEndpoint)
-        namespace: 'prod'
-        command: 'get'
-        useConfigurationFile: true
-        configuration: manifest/vote-app.yml
-
-    - task: Bash@3
-      inputs:
-        targetType: 'inline'
-        script: |
-          ONPROD_OUTPUT=$(echo $(onprod.KubernetesCliOutput) | tr -d '\r')
-          podcount=$(echo $ONPROD_OUTPUT | jq '.items | length')
-          echo "Total number of production pods: $podcount"
-          if [ "$podcount" -eq "0" ]; then
-            echo "Error: No production pods found"
-            exit 1
-          fi
-      displayName: Check production pod count
-
-    - task: Bash@3
-      inputs:
-        targetType: 'inline'
-        script: 'sleep 30'
-        displayName: Wait for load test results
-
-    - task: CmdLine@2
-      inputs:
-        script: 'echo "Performance test on Prod completed."'
-      displayName: Performance test results
-
-- stage: Rollback
-  condition: failed()
-  dependsOn: PerformanceTest
-  displayName: Rollback Deployment
-  jobs:
-  - job: Rollback
-    displayName: Rollback Deployment
-    pool:
-      vmImage: 'ubuntu-latest'
-    steps:
-    - task: Kubernetes@1
-      inputs:
-        connectionType: Kubernetes Service Connection
-        kubernetesServiceEndpoint: $(kubernetesServiceEndpoint)
-        namespace: prod
-        command: rollback
-        arguments: manifest/vote-app.yml
-      displayName: Rollback deployment on Prod
-
-    - task: Bash@3
-      inputs:
-        targetType: 'inline'
-        script: 'echo "Rollback completed."'
-      displayName: Rollback status
+        action: 'deploy' # Action à effectuer : déploiement'
+        namespace: 'prod' # Namespace où l'application sera déployée
+        manifests: manifest/vote-app.yml # Fichier de manifeste à utiliser pour le déploiement
+        rolloutStatusTimeout: '60' # Délai d'attente maximal pour le déploiement (en secondes)
