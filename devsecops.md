@@ -4,7 +4,7 @@ Ces outils sont essentiels pour assurer la sécurité et la fiabilité des appli
 
 ## SonarQube:
 
-SonarQube est un outil d'analyse de code statique qui détecte les problèmes de sécurité, les bugs et les vulnérabilités dans le code source des applications. Il prend en charge un large éventail de langages de programmation et s'intègre facilement à la plupart des systèmes de gestion de version.
+SonarQube est un outil d'analyse de code statique qui détecte les problèmes de sécurité, les bugs et les vulnérabilités dans le code source des applications. Il prend en charge un large éventail de langages de programmation et s'intègre facilement à la plupart des systèmes de gestion de version. En alternative à SonarQube, il y à aussi Codacy et Code Climate qui proposent également des essais gratuit.
 
 **Avantages :**
 
