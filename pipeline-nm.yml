@@ -118,24 +118,28 @@ stages:
         tags: | # Ajouter la nouvelle version en tant que tag
           $(vernew)
       name: "docker_pub"
+      # analyse de vulnérabilités avec Trivy pour les images de conteneurs 
+    - task: trivy@1
+      inputs:
+        image: '$(repository):$(vernew)'
 
-- stage: test_gryp
-  displayName: test avec gryp
+- stage: test_grype
+  displayName: test avec grype
   # Exécuter cette étape seulement si les étapes précédentes ont réussi
   condition: succeeded()
   jobs:
-  - job: test_gryp
-    displayName: test avec gryp
+  - job: test_grype
+    displayName: test avec grype
     pool:
       # Utiliser une image Ubuntu la plus récente pour l'exécution des tâches
       vmImage: 'ubuntu-latest'
     steps:
-    # Installer l'outil Gryp à l'aide du script d'installation
+    # Installer l'outil grype à l'aide du script d'installation
     - task: CmdLine@2
       inputs:
         script: |
           sudo curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
-    # Exécuter l'outil Gryp pour analyser les vulnérabilités et stocker le résultat dans une variable
+    # Exécuter l'outil grype pour analyser les vulnérabilités et stocker le résultat dans une variable
     - task: CmdLine@2
       name: finalresult
       inputs:
@@ -144,12 +148,12 @@ stages:
           grype_var=$(echo $?)
           echo "##vso[task.setvariable variable=gryre;isOutput=true]$grype_var"
 
-- stage: VerificationGrype
-  displayName: Vérification manuelle Grype
-  # Cette étape dépend de l'étape 'test_gryp'
-  dependsOn: test_gryp
-  # Exécuter cette étape seulement si le résultat de l'étape 'test_gryp' est différent de 0 (c'est-à-dire, s'il y a des vulnérabilités)
-  condition: ne(dependencies.test_gryp.outputs['test_gryp.finalresult.gryre'],0)
+- stage: Verificationgrype
+  displayName: Vérification manuelle grype
+  # Cette étape dépend de l'étape 'test_grype'
+  dependsOn: test_grype
+  # Exécuter cette étape seulement si le résultat de l'étape 'test_grype' est différent de 0 (c'est-à-dire, s'il y a des vulnérabilités)
+  condition: ne(dependencies.test_grype.outputs['test_grype.finalresult.gryre'],0)
   jobs:
   - job: Verifmanuelle
     pool: server
@@ -160,7 +164,7 @@ stages:
       inputs:
         notifyUsers: |
           simplon.nicolasmarty@gmail.com
-        instructions: 'Please check the problem for Grype'
+        instructions: 'Please check the problem for grype'
         onTimeout: 'reject'
 
 - stage: 'QAL_Deployment'
