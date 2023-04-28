@@ -13,41 +13,86 @@ variables:
   organization: 'nicolasmarty'
   connecteursonarcloud: 'connect_sonar'
 
-# Liste des étapes du pipeline
+# # Liste des étapes du pipeline
 stages:
-# Etape 1 : Valider l'application
-- stage: 'valid_app'
-  displayName: 'valid_app'
-  jobs:
-  - job: version_compare
-    displayName: 'validcode' 
-    # Utiliser une image Ubuntu pour l'environnement d'exécution
-    pool:
-      vmImage: ubuntu-latest
-    steps:
-    # Récupérer le code source
-    - checkout: self
-      fetchDepth: 0
-    # Préparer l'analyse SonarCloud
-    - task: SonarCloudPrepare@1
-      inputs:
-        SonarCloud: $(connecteursonarcloud)
-        organization: $(organization)
-        scannerMode: 'CLI'
-        configMode: 'manual'
-        cliProjectKey: 'uncia-key'
-        cliProjectName: 'Brief-8'
-        cliSources: '.'
-    # Exécuter l'analyse SonarCloud
-    - task: SonarCloudAnalyze@1
-    # Publier les résultats de l'analyse SonarCloud
-    - task: SonarCloudPublish@1
-      inputs:
-        pollingTimeoutSec: '300'
+# # Etape 1 : Valider l'application
+# - stage: 'valid_app'
+#   displayName: 'valid_app'
+#   jobs:
+#   - job: version_compare
+#     displayName: 'validcode' 
+#     # Utiliser une image Ubuntu pour l'environnement d'exécution
+#     pool:
+#       vmImage: ubuntu-latest
+#     steps:
+#     # Récupérer le code source
+#     - checkout: self
+#       fetchDepth: 0
+#     # Préparer l'analyse SonarCloud
+#     - task: SonarCloudPrepare@1
+#       inputs:
+#         SonarCloud: $(connecteursonarcloud)
+#         organization: $(organization)
+#         scannerMode: 'CLI'
+#         configMode: 'manual'
+#         cliProjectKey: 'uncia-key'
+#         cliProjectName: 'Brief-8'
+#         cliSources: '.'
+#     # Exécuter l'analyse SonarCloud
+#     - task: SonarCloudAnalyze@1
+#     # Publier les résultats de l'analyse SonarCloud
+#     - task: SonarCloudPublish@1
+#       inputs:
+#         pollingTimeoutSec: '300'
 
+- stage: test_grype
+  displayName: test avec grype
+  # Exécuter cette étape seulement si les étapes précédentes ont réussi
+  jobs:
+  - job: test_grype
+    displayName: test avec grype
+    pool:
+      # Utiliser une image Ubuntu la plus récente pour l'exécution des tâches
+      vmImage: 'ubuntu-latest'
+    steps:
+    # Installer l'outil grype à l'aide du script d'installation
+    - task: CmdLine@2
+      inputs:
+        script: |
+          sudo curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+    # Exécuter l'outil grype pour analyser les vulnérabilités et stocker le résultat dans une variable
+    - task: CmdLine@2
+      name: finalresult
+      inputs:
+        script: |
+          sudo grype dir:/home/vsts/work/1/
+          grype_var=$(echo $?)
+          echo "##vso[task.setvariable variable=gryre;isOutput=true]$grype_var"
+- stage: Verificationgrype
+  displayName: Vérification manuelle grype
+  # Cette étape dépend de l'étape 'test_grype'
+  dependsOn: test_grype
+  # Exécuter cette étape seulement si le résultat de l'étape 'test_grype' est différent de 0 (c'est-à-dire, s'il y a des vulnérabilités)
+  condition: ne(dependencies.test_grype.outputs['test_grype.finalresult.gryre'],0)
+  jobs:
+  - job: Verifmanuelle
+    pool: server
+    steps:
+    # Demander une vérification manuelle en cas de vulnérabilités détectées
+    - task: ManualValidation@0
+      timeoutInMinutes: 240 # La tâche expire au bout de 4 heures
+      inputs:
+        notifyUsers: |
+          simplon.nicolasmarty@gmail.com
+        instructions: 'Please check the problem for grype'
+        onTimeout: 'reject'
 # Etape 2 : Récupérer la version de l'application
 - stage: 'get_version' 
   displayName: 'get_version' 
+  condition: or(eq(dependencies.test_grype.outputs['test_grype.finalresult.gryre'],0),succeeded('Verificationgrype'))
+  dependsOn: 
+  - test_grype
+  - Verificationgrype
   jobs:
   - job: 'job_version' 
     displayName: 'job_version' 
@@ -92,6 +137,7 @@ stages:
 
 # Étape pour construire l'image Docker de l'application
 - stage: 'Build_docker_image'
+  condition: succeeded('get_version')
   variables:
     # Récupérer les versions de l'étape précédente
     verrep: $[stageDependencies.get_version.job_version.outputs['scver.verrep']]
@@ -119,60 +165,16 @@ stages:
           $(vernew)
       name: "docker_pub"
       # analyse de vulnérabilités avec Trivy pour les images de conteneurs 
-    - task: trivy@1
-      inputs:
-        image: '$(repository):$(vernew)'
-
-- stage: test_grype
-  displayName: test avec grype
-  # Exécuter cette étape seulement si les étapes précédentes ont réussi
-  condition: succeeded()
-  jobs:
-  - job: test_grype
-    displayName: test avec grype
-    pool:
-      # Utiliser une image Ubuntu la plus récente pour l'exécution des tâches
-      vmImage: 'ubuntu-latest'
-    steps:
-    # Installer l'outil grype à l'aide du script d'installation
-    - task: CmdLine@2
-      inputs:
-        script: |
-          sudo curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
-    # Exécuter l'outil grype pour analyser les vulnérabilités et stocker le résultat dans une variable
-    - task: CmdLine@2
-      name: finalresult
-      inputs:
-        script: |
-          sudo grype dir:/home/vsts/work/1/
-          grype_var=$(echo $?)
-          echo "##vso[task.setvariable variable=gryre;isOutput=true]$grype_var"
-
-- stage: Verificationgrype
-  displayName: Vérification manuelle grype
-  # Cette étape dépend de l'étape 'test_grype'
-  dependsOn: test_grype
-  # Exécuter cette étape seulement si le résultat de l'étape 'test_grype' est différent de 0 (c'est-à-dire, s'il y a des vulnérabilités)
-  condition: ne(dependencies.test_grype.outputs['test_grype.finalresult.gryre'],0)
-  jobs:
-  - job: Verifmanuelle
-    pool: server
-    steps:
-    # Demander une vérification manuelle en cas de vulnérabilités détectées
-    - task: ManualValidation@0
-      timeoutInMinutes: 240 # La tâche expire au bout de 4 heures
-      inputs:
-        notifyUsers: |
-          simplon.nicolasmarty@gmail.com
-        instructions: 'Please check the problem for grype'
-        onTimeout: 'reject'
+    # - task: trivy@1
+    #   inputs:
+    #     image: '$(repository):$(vernew)'
 
 - stage: 'QAL_Deployment'
   dependsOn:
   - get_version
   - Build_docker_image
   # Exécuter cette étape seulement si les étapes précédentes ont réussi
-  condition: succeeded()
+  condition: succeeded('Build_docker_image')
   displayName: 'Deploy on QAL' 
   jobs:
   - job: 'QAL_Deploy'
@@ -202,7 +204,7 @@ stages:
         rolloutStatusTimeout: '60' # Délai d'attente maximal pour le déploiement (en secondes)
 
 - stage: 'Test_Charge'
-  condition: succeeded()
+  condition: succeeded('QAL_Deployment')
   dependsOn:
   - get_version
   - QAL_Deployment
@@ -227,7 +229,6 @@ stages:
         script: |
           exitcode=$(curl -X POST -d "vote=Windows" http://brief8.uncia.fr -w "%{http_code}" -o /dev/null)
           echo "##vso[task.setvariable variable=exit1]$exitcode"
-
     # Étape 2 : Tester le vote pour Linux
     - task: Bash@3
       name: linux
@@ -238,7 +239,6 @@ stages:
         script: |
           exitcode=$(curl -X POST -d "vote=Linux" http://brief8.uncia.fr -w "%{http_code}" -o /dev/null)
           echo "##vso[task.setvariable variable=exit2]$exitcode"
-
     # Étape 3 : Tester la requête pour réinitialiser les votes
     - task: Bash@3
       name: checksitereset
@@ -249,7 +249,9 @@ stages:
         script: |
           exitcode=$(curl -X POST -d "vote=reset" http://brief8.uncia.fr -w "%{http_code}" -o /dev/null)
           echo "##vso[task.setvariable variable=exit3]$exitcode"
-
+    - task: DockerInstaller@0
+      inputs:
+        dockerVersion: '17.09.0-ce'
     # Étape 4 : Effectuer un scan de sécurité avec OWASP ZAP
     - task: owaspzap@1
       inputs:
@@ -275,23 +277,20 @@ stages:
           echo "##vso[task.setvariable variable=trprod]$result"
           # Afficher les temps de réponse pour QAL et production
           echo qal=$trqal prod=$trprod
-
     # Étape 6 : Effectuer un test de charge si le temps de réponse en production est supérieur au temps de réponse en QAL
     - task: CmdLine@2
-      condition: gt(variables['trprod'],variables['trqal'])
+      condition: and(succeeded(), gt(variables['trprod'],variables['trqal']))
       name: TestCharge
       inputs:
         script: |
           # Exécuter 250 requêtes parallèles avec 20 jobs simultanés
           seq 250 | parallel --max-args 0  --jobs 20 "curl -k -iF 'vote=Linux' http://brief8.uncia.fr"
-
     # Étape 7 : Attendre 50 secondes
     - task: CmdLine@2
-      condition: gt(variables['trprod'],variables['trqal'])
+      condition: and(succeeded(), gt(variables['trprod'],variables['trqal']))
       inputs:
         script: 'sleep 50'
       name: "wait"
-
     # Étape 8 : Récupérer les informations sur les pods Kubernetes
     - task: Kubernetes@1
       name: kubepods
@@ -313,7 +312,6 @@ stages:
           sed -i 's/{{ version }}/'$(vernew)'/g' manifest/vote-app.yml
           # Afficher la nouvelle version
           echo $(vernew)
-
 # Étape 10 : Obtenir le nombre de pods
     - task: CmdLine@2
       condition: succeeded()
@@ -329,21 +327,30 @@ stages:
           # Sauvegarder le nombre de réplicas dans une variable pour pouvoir l'utiliser plus tard
           echo "##vso[task.setvariable variable=appcnt;isOutput=true]$voteappcount"
 
-# Supprimer le déploiement dans l'environnement de test
-    - task: KubernetesManifest@0
-      name: "kube_qal_del"
+- stage: 'Manualvalidation'
+  dependsOn:
+  - Test_Charge
+  condition: failed('Test_Charge') 
+  displayName: 'In waiting of validation after tests has runned' 
+  jobs:
+  - job: waitForValidation
+    displayName: Wait for external validation
+    pool: server
+    timeoutInMinutes: 3600
+    steps:
+    - task: ManualValidation@0
+      timeoutInMinutes: 3600
       inputs:
-        action: 'delete'
-        kubernetesServiceConnection: 'connectK8SNM' # Connexion au service Kubernetes
-        namespace: 'qal' # Namespace où l'application sera déployée
-        arguments: '-f $(System.DefaultWorkingDirectory)/qal/'
-
+        notifyUsers: |
+          simplon.nicolasmarty@gmail.com
+        instructions: 'Please validate the build configuration and resume'
+        onTimeout: 'resume'
 # Déployer l'application en utilisant la stratégie canary
 - stage: 'Canary_deploy'
   dependsOn:
   - Test_Charge
   - get_version
-  condition: gt(dependencies.Test_Charge.outputs['Test.GetPodsCount.appcnt'],2)
+  condition: or(succeeded('Test_Charge'),succeeded('Manualvalidation'))
   displayName: 'Canary_deploy' 
   jobs:
   - job: 'canary'
@@ -361,7 +368,6 @@ stages:
         script: |
           # Remplacer la chaîne "{{ version }}" par la valeur de la variable 'vernew' dans le fichier manifest/vote-app.yml
           sed -i 's/{{ version }}/'$(vernew)'/g' manifest/vote-app.yml
-
     - task: KubernetesManifest@0
       condition: gt(variables.appcnt,2)
       inputs:
@@ -378,7 +384,7 @@ stages:
 - stage: 'ManualIntervention'
   dependsOn:
   - Canary_deploy
-  condition: succeeded() 
+  condition: succeeded('Canary_deploy') 
   displayName: 'En attente de validation' 
   jobs:
   - job: waitForValidation
@@ -396,7 +402,7 @@ stages:
 
 - stage: 'supcanar'
   # Cette étape (stage) est exécutée lorsque les étapes précédentes échouent
-  condition: failed()
+  condition: or(failed('ManualIntervention'),failed('Manualvalidation'))
   dependsOn:
   - get_version
   - ManualIntervention
@@ -436,7 +442,7 @@ stages:
   - ManualIntervention
   - get_version
   # Cette étape (stage) est exécutée lorsque les étapes précédentes réussissent
-  condition: succeeded()
+  condition: succeeded('ManualIntervention')
   displayName: 'Deploy on Prod and remove canary'
   jobs:
   - job: 'Deployonprod'
@@ -468,6 +474,7 @@ stages:
       name: "kube_prod"
       inputs:
         action: 'deploy' # Action à effectuer : déploiement'
+        kubernetesServiceConnection: 'connectK8SNM' # Connexion au service 
         namespace: 'prod' # Namespace où l'application sera déployée
         manifests: manifest/vote-app.yml # Fichier de manifeste à utiliser pour le déploiement
         rolloutStatusTimeout: '60' # Délai d'attente maximal pour le déploiement (en secondes)
