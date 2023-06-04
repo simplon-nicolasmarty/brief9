@@ -1,0 +1,19 @@
+- stage: test_grype
+  displayName: test avec grype
+  jobs:
+  - job: test_grype
+    displayName: test avec grype
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: CmdLine@2
+      inputs:
+        script: |
+          sudo curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+    - task: CmdLine@2
+      name: finalresult
+      inputs:
+        script: |
+          sudo grype dir:/home/vsts/work/1/
+          grype_var=$(echo $?)
+          echo "##vso[task.setvariable variable=gryre;isOutput=true]$grype_var"

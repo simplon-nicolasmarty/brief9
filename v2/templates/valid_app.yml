@@ -1,0 +1,24 @@
+# Stage 1: Validate the application
+- stage: 'valid_app'
+  displayName: 'valid_app'
+  jobs:
+  - job: version_compare
+    displayName: 'validcode' 
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: self
+      fetchDepth: 0
+    - task: SonarCloudPrepare@1
+      inputs:
+        SonarCloud: $(connecteursonarcloud)
+        organization: $(organization)
+        scannerMode: 'CLI'
+        configMode: 'manual'
+        cliProjectKey: 'uncia-key'
+        cliProjectName: 'Brief-8'
+        cliSources: '.'
+    - task: SonarCloudAnalyze@1
+    - task: SonarCloudPublish@1
+      inputs:
+        pollingTimeoutSec: '300'

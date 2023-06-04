@@ -1,0 +1,24 @@
+- stage: 'Build_docker_image'
+  condition: succeeded('get_version')
+  variables:
+    verrep: $[stageDependencies.get_version.job_version.outputs['scver.verrep']]
+    vernew: $[stageDependencies.get_version.job_version.outputs['scver.vernew']]
+  dependsOn:
+  - get_version
+  displayName: 'Build_docker_image'
+  jobs:
+  - job: 'Docker_image'
+    displayName: 'Docker Image Build'
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - task: Docker@2
+      condition: ne(variables.verrep,variables.vernew)
+      inputs:
+        containerRegistry: $(dockerRegistryServiceConnection)
+        repository: $(repository)
+        command: 'buildAndPush'
+        Dockerfile: '**/Dockerfile'
+        tags: |
+          $(vernew)
+      name: "docker_pub"

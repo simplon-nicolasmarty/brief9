@@ -1,0 +1,30 @@
+# This pipeline is triggered when a change is made to the master branch
+trigger:
+- master
+
+# Definition of variables used in the pipeline
+variables:
+  dockerRegistryServiceConnection: 'ConnectDockerHub'
+  imageRepository: 'k8b8nm'
+  containerRegistry: 'nemesys34'
+  repository: 'nemesys34/k8b8nm'
+  kubernetesServiceEndpoint: 'connectK8SNM'
+  aksClusterName: 'K8B8NM'
+  organization: 'nicolasmarty'
+  connecteursonarcloud: 'connect_sonar'
+  notifyUsers: 'simplon.nicolasmarty@gmail.com' # Moved to variables
+
+# List of pipeline stages
+stages:
+- template: templates/valid_app.yml # Moved to a separate file
+- template: templates/test_grype.yml # Moved to a separate file
+- template: templates/Verificationgrype.yml # Moved to a separate file
+- template: templates/get_version.yml # Moved to a separate file
+- template: templates/Build_docker_image.yml # Moved to a separate file
+- template: templates/QAL_Deployment.yml # Moved to a separate file
+- template: templates/Test_Charge.yml # Moved to a separate file
+- template: templates/Manualvalidation.yml # Moved to a separate file
+- template: templates/Canary_deploy.yml # Moved to a separate file
+- template: templates/ManualIntervention.yml # Moved to a separate file
+- template: templates/supcanar.yml # Moved to a separate file
+- template: templates/DeployOnProd.yml # Moved to a separate file

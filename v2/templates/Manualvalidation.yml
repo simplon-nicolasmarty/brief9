@@ -1,0 +1,18 @@
+- stage: 'Manualvalidation'
+  dependsOn:
+  - Test_Charge
+  condition: failed('Test_Charge') 
+  displayName: 'In waiting of validation after tests has runned' 
+  jobs:
+  - job: waitForValidation
+    displayName: Wait for external validation
+    pool: server
+    timeoutInMinutes: 3600
+    steps:
+    - task: ManualValidation@0
+      timeoutInMinutes: 3600
+      inputs:
+        notifyUsers: |
+          simplon.nicolasmarty@gmail.com
+        instructions: 'Please validate the build configuration and resume'
+        onTimeout: 'resume'

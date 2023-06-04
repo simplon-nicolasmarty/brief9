@@ -1,0 +1,18 @@
+- stage: 'ManualIntervention'
+  dependsOn:
+  - Canary_deploy
+  condition: succeeded('Canary_deploy') 
+  displayName: 'En attente de validation' 
+  jobs:
+  - job: waitForValidation
+    displayName: Wait for external validation
+    pool: server
+    timeoutInMinutes: 10080
+    steps:
+    - task: ManualValidation@0
+      timeoutInMinutes: 10080
+      inputs:
+        notifyUsers: |
+          simplon.nicolasmarty@gmail.com
+        instructions: 'Valider le déploiement'
+        onTimeout: 'resume'

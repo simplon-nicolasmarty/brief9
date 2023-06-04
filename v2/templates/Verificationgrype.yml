@@ -1,0 +1,14 @@
+- stage: Verificationgrype
+  displayName: Vérification manuelle grype
+  dependsOn: test_grype
+  condition: ne(dependencies.test_grype.outputs['test_grype.finalresult.gryre'],0)
+  jobs:
+  - job: Verifmanuelle
+    pool: server
+    steps:
+    - task: ManualValidation@0
+      timeoutInMinutes: 240
+      inputs:
+        notifyUsers: $(notifyUsers)
+        instructions: 'Please check the problem for grype'
+        onTimeout: 'reject'

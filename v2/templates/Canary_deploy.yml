@@ -1,0 +1,32 @@
+- stage: 'Canary_deploy'
+  dependsOn:
+  - Test_Charge
+  - get_version
+  condition: or(succeeded('Test_Charge'),succeeded('Manualvalidation'))
+  displayName: 'Canary_deploy' 
+  jobs:
+  - job: 'canary'
+    variables:
+      verold: $[stageDependencies.get_version.job_version.outputs['scver.verold']]
+      vernew: $[stageDependencies.get_version.job_version.outputs['scver.vernew']]
+      appcnt: $[stageDependencies.Test_Charge.Test.outputs['GetPodsCount.appcnt']]
+    displayName: 'Canary_deploy' 
+    pool:
+      vmImage: 'ubuntu-latest' 
+    steps:
+    - task: CmdLine@2
+      name: change_manif
+      inputs:
+        script: |
+          sed -i 's/{{ version }}/'$(vernew)'/g' manifest/vote-app.yml
+    - task: KubernetesManifest@0
+      condition: gt(variables.appcnt,2)
+      inputs:
+        action: 'deploy'
+        kubernetesServiceConnection: 'connectK8SNM'
+        namespace: 'prod'
+        strategy: 'canary'
+        percentage: '30'
+        manifests: manifest/vote-app.yml
+        rolloutStatusTimeout: '120'
+      name: "kube_canary"

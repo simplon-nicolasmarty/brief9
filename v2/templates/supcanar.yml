@@ -1,0 +1,31 @@
+- stage: 'supcanar'
+  condition: or(failed('ManualIntervention'),failed('Manualvalidation'))
+  dependsOn:
+  - get_version
+  - ManualIntervention
+  - Test_Charge
+  displayName: 'remove canary'
+  jobs:
+  - job: 'delete'
+    variables:
+      verold: $[stageDependencies.get_version.job_version.outputs['scver.verold']]
+      vernew: $[stageDependencies.get_version.job_version.outputs['scver.vernew']]
+    displayName: 'Deploy on prod and remove canary'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: CmdLine@2
+      name: change_manif
+      inputs:
+        script: |
+          sed -i 's/{{ version }}/'$(vernew)'/g' manifest/vote-app.yml
+    - task: KubernetesManifest@0
+      name: "delete_canary"
+      inputs:
+        action: 'deploy'
+        kubernetesServiceConnection: 'connectK8SNM'
+        namespace: 'prod'
+        strategy: 'canary'
+        percentage: '0'
+        manifests: manifest/vote-app.yml
+        rolloutStatusTimeout: '60'

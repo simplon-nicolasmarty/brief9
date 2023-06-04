@@ -1,0 +1,123 @@
+- stage: 'Test_Charge'
+  condition: succeeded('QAL_Deployment')
+  dependsOn:
+  - get_version
+  - QAL_Deployment
+  displayName: 'Test_Charge'
+  jobs:
+  - job: 'Test'
+    timeoutInMinutes: 5
+    variables:
+      verold: $[stageDependencies.get_version.job_version.outputs['scver.verold']]
+      vernew: $[stageDependencies.get_version.job_version.outputs['scver.vernew']]
+      appcnt: $[stageDependencies.Test_Charge.Test.outputs['GetPodsCount.appcnt']]
+    displayName: 'Test_Charge' 
+    pool:
+      vmImage: 'ubuntu-latest' 
+    steps:
+    # Étape 1 : Tester l'application
+    - task: Bash@3
+      name: apptest
+      displayName: app test
+      inputs:
+        targetType: 'inline'
+        script: |
+          exitcode=$(curl -X POST -d "vote=Windows" http://brief8.uncia.fr -w "%{http_code}" -o /dev/null)
+          echo "##vso[task.setvariable variable=exit1]$exitcode"
+    # Étape 2 : Tester le vote pour Linux
+    - task: Bash@3
+      name: linux
+      displayName: Test vote Linux'
+      condition: eq(variables['exit1'],'200')
+      inputs:
+        targetType: 'inline'
+        script: |
+          exitcode=$(curl -X POST -d "vote=Linux" http://brief8.uncia.fr -w "%{http_code}" -o /dev/null)
+          echo "##vso[task.setvariable variable=exit2]$exitcode"
+    # Étape 3 : Tester la requête pour réinitialiser les votes
+    - task: Bash@3
+      name: checksitereset
+      displayName: Test de la requête pour reset
+      condition: eq(variables['exit2'],'200')
+      inputs:
+        targetType: 'inline'
+        script: |
+          exitcode=$(curl -X POST -d "vote=reset" http://brief8.uncia.fr -w "%{http_code}" -o /dev/null)
+          echo "##vso[task.setvariable variable=exit3]$exitcode"
+    - task: DockerInstaller@0
+      inputs:
+        dockerVersion: '17.09.0-ce'
+    # Étape 4 : Effectuer un scan de sécurité avec OWASP ZAP
+    - task: owaspzap@1
+      inputs:
+        aggressivemode: true
+        scantype: 'targetedScan'
+        url: 'http://brief8.uncia.fr'
+
+    # Étape 5 : Comparer les temps de réponse entre l'environnement QAL et l'environnement de production
+    - task: CmdLine@2
+      condition: eq(variables['exit3'],'200')
+      name: timetoresp
+      inputs:
+        script: |
+          inc=0.5
+          # Mesurer le temps de réponse pour l'environnement QAL
+          trqal=$(curl -o /dev/null -s -w %{time_total}\\n  -iF 'vote=linux' http://brief8.uncia.fr)
+          # Mesurer le temps de réponse pour l'environnement de production
+          trprod=$(curl -o /dev/null -s -w %{time_total}\\n  -iF 'vote=linux' http://brief8.uncia.fr)
+          # Calculer la somme du temps de réponse de production et d'une constante 'inc'
+          result=$(echo "$trprod + $inc"|bc)
+          # Définir les variables pour les temps de réponse de QAL et de production
+          echo "##vso[task.setvariable variable=trqal]$trqal"
+          echo "##vso[task.setvariable variable=trprod]$result"
+          # Afficher les temps de réponse pour QAL et production
+          echo qal=$trqal prod=$trprod
+    # Étape 6 : Effectuer un test de charge si le temps de réponse en production est supérieur au temps de réponse en QAL
+    - task: CmdLine@2
+      condition: and(succeeded(), gt(variables['trprod'],variables['trqal']))
+      name: TestCharge
+      inputs:
+        script: |
+          # Exécuter 250 requêtes parallèles avec 20 jobs simultanés
+          seq 250 | parallel --max-args 0  --jobs 20 "curl -k -iF 'vote=Linux' http://brief8.uncia.fr"
+    # Étape 7 : Attendre 50 secondes
+    - task: CmdLine@2
+      condition: and(succeeded(), gt(variables['trprod'],variables['trqal']))
+      inputs:
+        script: 'sleep 50'
+      name: "wait"
+    # Étape 8 : Récupérer les informations sur les pods Kubernetes
+    - task: Kubernetes@1
+      name: kubepods
+      condition: succeeded()
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: 'connectK8SNM' # Connexion au service Kubernetes
+        namespace: 'qal' # Namespace où l'application sera déployée
+        command: 'get'
+        useConfigurationFile: true
+        configuration: './manifest/vote-app.yml'
+
+    # Étape 9 : Modifier le fichier de manifeste pour utiliser la nouvelle version
+    - task: CmdLine@2
+      name: change_manif
+      inputs:
+        script: |
+          # Remplacer la chaîne "{{ version }}" par la valeur de la variable 'vernew' dans le fichier manifest/vote-app.yml
+          sed -i 's/{{ version }}/'$(vernew)'/g' manifest/vote-app.yml
+          # Afficher la nouvelle version
+          echo $(vernew)
+    # Étape 10 : Obtenir le nombre de pods
+    - task: CmdLine@2
+      condition: succeeded()
+      name: "GetPodsCount"
+      inputs:
+        script: |
+          # Récupérer le nombre de réplicas pour l'application "vote"
+          voteappcount=$(echo $KUBEPODS_KUBECTLOUTPUT | jq '.items[0].spec.replicas')
+          
+          # Afficher le nombre de réplicas
+          echo $voteappcount
+          
+          # Sauvegarder le nombre de réplicas dans une variable pour pouvoir l'utiliser plus tard
+          echo "##vso[task.setvariable variable=appcnt;isOutput=true]$voteappcount"

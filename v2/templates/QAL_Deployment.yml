@@ -1,0 +1,32 @@
+- stage: 'QAL_Deployment'
+  dependsOn:
+  - get_version
+  - Build_docker_image
+  condition: succeeded('Build_docker_image')
+  displayName: 'Deploy on QAL' 
+  jobs:
+  - job: 'QAL_Deploy'
+    variables:
+      verold: $[stageDependencies.get_version.job_version.outputs['scver.verold']]
+      vernew: $[stageDependencies.get_version.job_version.outputs['scver.vernew']]
+    displayName: 'Deploy on QAL' 
+    pool:
+      vmImage: 'ubuntu-lSure, here is the continuation of the `QAL_Deployment.yml` template:
+
+```yaml
+      vmImage: 'ubuntu-latest' 
+    steps:
+    - task: CmdLine@2
+      name: change_manif
+      inputs:
+        script: |
+          sed -i 's/{{ version }}/'$(vernew)'/g' manifest/vote-app.yml
+    - task: KubernetesManifest@0
+      name: "kube_qal"
+      condition: ne(variables.verold,variables.vernew)
+      inputs:
+        action: 'deploy'
+        kubernetesServiceConnection: 'connectK8SNM'
+        namespace: 'qal'
+        manifests: manifest/vote-app.yml
+        rolloutStatusTimeout: '60'
